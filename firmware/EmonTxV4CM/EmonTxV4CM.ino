@@ -25,34 +25,50 @@ v2.1: Factory test transmission moved to Grp 1 to avoid interference with record
 v2.1 (duplicate): printTemperatureSensorAddresses() was inside list_calibration() - reason not recorded [G.Hudson 23/12/21]
 v2.3: The two v2.1 versions merged [RW - 9/3/22]
 
+-brandon3055
+v2.4: Added suppport for expansion module. Expansion module acts as a seperate device on nodeID+1 and is enabled via DIP switch 2
+v2.4  Added support for second pulse input on digital in
 
 emonhub.conf node decoder (nodeid is 15 when switch is off, 16 when switch is on)
 See: https://github.com/openenergymonitor/emonhub/blob/emon-pi/configuration.md
 copy the following in to emonhub.conf:
 
 [[15]]
-    nodename = emontx4cm15
+    nodename = emonTx4cm15
     [[[rx]]]
-       names = MSG, Vrms, P1, P2, P3, P4, P5, P6, E1, E2, E3, E4, E5, E6, T1, T2, T3, pulse
-       datacodes = L,h,h,h,h,h,h,h,l,l,l,l,l,l,h,h,h,L
-       scales = 1,0.01,1,1,1,1,1,1,1,1,1,1,1,1,0.01,0.01,0.01,1
-       units = n,V,W,W,W,W,W,W,Wh,Wh,Wh,Wh,Wh,Wh,C,C,C,p
-       whitening = 1
+        names = MSG, Vrms, P1, P2, P3, P4, P5, P6, E1, E2, E3, E4, E5, E6, T1, T2, T3, pulse1, pulse2
+        datacodes = L,h,h,h,h,h,h,h,l,l,l,l,l,l,h,h,h,L,L
+        scales = 1,0.01,1,1,1,1,1,1,1,1,1,1,1,1,0.01,0.01,0.01,1,1
+        units = n,V,W,W,W,W,W,W,Wh,Wh,Wh,Wh,Wh,Wh,C,C,C,p,p
+        whitening = 1
+
+
+[[16]]
+    nodename = emonTx4cmExp16
+    [[[rx]]]
+        names = P7, P8, P9, P10, P11, P12, E7, E8, E9, E10, E11, E12
+        datacodes = h,h,h,h,h,h,l,l,l,l,l,l
+        scales = 1,1,1,1,1,1,1,1,1,1,1,1
+        units = W,W,W,W,W,W,Wh,Wh,Wh,Wh,Wh,Wh
+        whitening = 1
+
+        
 
 */
 #define Serial Serial3
 #include <Arduino.h>
 //#include <avr/wdt.h>
 
-const byte version = 23;                                // Firmware version divide by 10 to get version number e,g 05 = v0.5
+const byte version = 24;                                // Firmware version divide by 10 to get version number e,g 05 = v0.5
 
 // Comment/Uncomment as applicable
 #define DEBUG                                           // Debug level print out
-// #define SHOW_CAL                                     // Uncomment to show current for calibration
+#define SHOW_CAL                                        // Uncomment to show current for calibration
 
 #define RFM69CW
-#define RFMSELPIN PIN_PB5                                    // RFM pins
-#define RFPWR 0x99                                      // RFM Power setting - see rfm.ino for more
+#define RFMSELPIN PIN_PB5                               // RFM pins
+//#define RFPWR 0x99                                    // RFM Power setting - see rfm.ino for more
+#define RFPWR 0x9F
 #define FACTORYTESTGROUP 1                              // R.F. group for factory test only
 #include "emonLibCM.h"
 
@@ -64,7 +80,8 @@ const byte version = 23;                                // Firmware version divi
 enum rfband {RF12_433MHZ = 1, RF12_868MHZ, RF12_915MHZ }; // frequency band.
 
 byte RF_freq = RF12_433MHZ;                             // Frequency of radio module can be RF12_433MHZ, RF12_868MHZ or RF12_915MHZ. 
-byte nodeID = 10;                                       // node ID for this emonTx.
+byte nodeID = 15;                                       // node ID for this emonTx.
+byte nodeIDExt = 16;                                    // node ID for the extansion module if it is enabled.
 int networkGroup = 210;                                 // wireless network group, needs to be same as emonBase / emonPi and emonGLCD. OEM default is 210
 const int busyThreshold = -97;                          // Signal level below which the radio channel is clear to transmit
 const byte busyTimeout = 15;                            // Time in ms to wait for the channel to become clear, before transmitting anyway
@@ -72,12 +89,20 @@ int rf_whitening = 2;                                   // RF & data whitening -
 
 typedef struct {
     unsigned long Msg;
-    int Vrms,P1,P2,P3,P4,P5,P6; 
-    long E1,E2,E3,E4,E5,E6; 
+    int Vrms;
+    int P[6];
+    long E[6];
     int T1,T2,T3;
-    unsigned long pulse;
+    unsigned long pulse1, pulse2;
 } PayloadTX;
 PayloadTX emontx;                                       // create an instance
+
+typedef struct {
+    int P[6];
+    long E[6];
+} PayloadTXExt;
+PayloadTXExt emontxext;
+
 static void showString (PGM_P s);
  
 DeviceAddress allAddresses[3];                          // Array to receive temperature sensor addresses
@@ -94,42 +119,35 @@ int allTemps[3];                                        // Array to receive temp
 //----------------------------emonTx V3 Settings - Shared with config.ino------------------------
 #define PHASECAL 1.5
 
-float i1Cal = 75.075;         // 25A / 333mV output = 75.075
-float i1Lead = PHASECAL;
-float i2Cal = 75.075;         // 25A / 333mV output
-float i2Lead = PHASECAL;
-float i3Cal = 75.075;         // 25A / 333mV output
-float i3Lead = PHASECAL;
-float i4Cal = 75.075;         // 25A / 333mV output
-float i4Lead = PHASECAL;
-float i5Cal = 75.075;         // 25A / 333mV output
-float i5Lead = PHASECAL;
-float i6Cal = 75.075;         // 25A / 333mV output
-float i6Lead = PHASECAL;
+// 25A / 333mV output = 75.075
+// 102.461A / 333mv   = 307.69
+// 30.135A / 333mv    = 90.495
+
+float iCal[] = {307.69, 90.495, 90.495, 90.495, 90.495, 90.495};
+float iLead[] = {PHASECAL, PHASECAL, PHASECAL, PHASECAL, PHASECAL, PHASECAL};
+int adcChannels[] = {3, 4, 5, 6, 8, 9};
+
+float iCalExt[] = {90.495, 90.495, 90.495, 90.495, 90.495, 30.786839};
+float iLeadExt[] = {PHASECAL, PHASECAL, PHASECAL, PHASECAL, PHASECAL, PHASECAL};
+int adcChannelsExt[] = {10, 11, 16, 17, 18, 19};
 
 float vCal  = 810.4;          // (6 x 10000) / 75 = 800.0
 const float vCal_USA = 810.4; // Will be the same
 
 bool  USA=false;
 float assumedVrms2 = 240.0;  // voltage to use for calculating assumed apparent power if a.c input is absent.
-float period = 9.96;        // datalogging period
-bool  pulse_enable = true;  // pulse counting
-int   pulse_period = 100;   // pulse min period
-bool  temp_enable = true;   // enable temperature measurement
-byte  temp_addr[24];        // sensor address data
-
-
+float period = 9.96;         // datalogging period
+bool  pulse_enable = true;   // pulse counting
+int   pulse_period = 100;    // pulse min period
+bool  temp_enable = true;    // enable temperature measurement
+byte  temp_addr[24];         // sensor address data
+bool  ext_enable = false;    // enable the extension module
 
 //----------------------------emonTx V3 hard-wired connections-----------------------------------
 const byte LEDpin      = PIN_PB2;  // emonTx V3 LED
 const byte DIP_switch1 = PIN_PA4;  // RF node ID (default no change in node ID, switch on for nodeID + 1) switch off D8 is HIGH from internal pullup
 const byte DIP_switch2 = PIN_PA5;  // Voltage selection 240 / 120 V AC (default switch off 240V)  - switch off D9 is HIGH from internal pullup
 
-//---------------------------------CT availability status----------------------------------------
-byte CT_count = 0;
-bool CT1, CT2, CT3, CT4, CT5, CT6; // Record if CT present during startup
-
-// unsigned long start = 0;
 
 //----------------------------------------Setup--------------------------------------------------
 void setup() 
@@ -146,8 +164,11 @@ void setup()
   Serial.begin(115200);
 
   // ---------------------------------------------------------------------------------------
-  if (digitalRead(DIP_switch1)==LOW) nodeID++;                         // IF DIP switch 1 is switched on (LOW) then add 1 from nodeID
-
+  if (digitalRead(DIP_switch1)==LOW) {
+    nodeID++;                         // IF DIP switch 1 is switched on (LOW) then add 1 from nodeID
+    nodeIDExt++;
+  }
+  
   #ifdef DEBUG
     Serial.print(F("emonTx V4.0 EmonLibCM Continuous Monitoring V")); Serial.println(version*0.1);
     Serial.println(F("OpenEnergyMonitor.org"));
@@ -155,7 +176,7 @@ void setup()
     Serial.println(F("describe:EmonTX4CM"));
   #endif
  
-  //load_config(true);                                                   // Load RF config from EEPROM (if any exists)
+  load_config(true);                                                   // Load RF config from EEPROM (if any exists)
 
   delay(1000);
   pinMode(RFMSELPIN, INPUT_PULLUP);
@@ -171,6 +192,9 @@ void setup()
     #ifdef DEBUG
       Serial.print(F("RFM69CW only"));
       Serial.print(F(" Node: ")); Serial.print(nodeID);
+      if (ext_enable) {
+        Serial.print(F(" NodeExt: ")); Serial.print(nodeIDExt);
+      }
       Serial.print(" Freq: ");
       if (RF_freq == RF12_433MHZ) Serial.print(F("433MHz"));
       if (RF_freq == RF12_868MHZ) Serial.print(F("868MHz"));
@@ -187,14 +211,14 @@ void setup()
   }
   
   // ---------------------------------------------------------------------------------------
-  // readConfigInput();
+   readConfigInput();
 
   if (rf_whitening)
   {
     rfm_init(RF_freq);                                                    // initialize RFM
     for (int i=10; i>=0; i--)                                             // Send RF test sequence (for factory testing)
     {
-      emontx.P1=i;
+      emontx.P[0]=i;
       PayloadTX tmp = emontx;
       if (rf_whitening == 2)
       {
@@ -205,7 +229,7 @@ void setup()
       rfm_send((byte *)&tmp, sizeof(tmp), FACTORYTESTGROUP, nodeID, busyThreshold, busyTimeout);
       delay(100);
     }
-    emontx.P1=0;
+    emontx.P[0]=0;
   }
   
   // ---------------------------------------------------------------------------------------
@@ -224,20 +248,28 @@ void setup()
   
   EmonLibCM_SetADC_VChannel(0, vCal);                      // ADC Input channel, voltage calibration
   if (USA) EmonLibCM_SetADC_VChannel(0, vCal_USA);
-  EmonLibCM_SetADC_IChannel(3, i1Cal, i1Lead);             // ADC Input channel, current calibration, phase calibration
-  EmonLibCM_SetADC_IChannel(4, i2Cal, i2Lead);
-  EmonLibCM_SetADC_IChannel(5, i3Cal, i3Lead);
-  EmonLibCM_SetADC_IChannel(6, i4Cal, i4Lead);
-  EmonLibCM_SetADC_IChannel(8, i5Cal, i5Lead);
-  EmonLibCM_SetADC_IChannel(9, i6Cal, i6Lead);
+
+  for (int i = 0; i < 6; i++) {
+    EmonLibCM_SetADC_IChannel(adcChannels[i], iCal[i], iLead[i]);  // ADC Input channel, current calibration, phase calibration
+  }
+
+  if (ext_enable) {
+    for (int i = 0; i < 6; i++) {
+      EmonLibCM_SetADC_IChannel(adcChannelsExt[i], iCalExt[i], iLeadExt[i]); 
+    }
+  }
 
   // mains frequency 50Hz
   if (USA) EmonLibCM_cycles_per_second(60);                // mains frequency 60Hz
   EmonLibCM_datalog_period(period);                        // period of readings in seconds - normal value for emoncms.org  
 
-  EmonLibCM_setPulseEnable(pulse_enable);                  // Enable pulse counting
-  EmonLibCM_setPulsePin(PIN_PA6, PIN_PA6);
-  EmonLibCM_setPulseMinPeriod(pulse_period);
+  EmonLibCM_setPulseEnable(0, pulse_enable);                  // Enable pulse counting
+  EmonLibCM_setPulseEnable(1, pulse_enable); 
+//  EmonLibCM_setPulsePin(PIN_PA6, PIN_PA6); <-- Breaks when you actually supply a propper channelbecause someone did a dumb. (channel != 0 || channel != 1) should be (channel != 0 && channel != 1)
+  EmonLibCM_setPulsePin(0, PIN_PA6, digitalPinToInterrupt(PIN_PA6)); //<-- Need to use the method that takes an interrupt because it does not do the "(channel != 0 || channel != 1)" check
+  EmonLibCM_setPulsePin(1, PIN_PA7, digitalPinToInterrupt(PIN_PA7));
+  EmonLibCM_setPulseMinPeriod(0, pulse_period);
+  EmonLibCM_setPulseMinPeriod(1, pulse_period);
 
   EmonLibCM_setTemperatureDataPin(PIN_PB4);                      // OneWire data pin (emonTx V3.4)
   EmonLibCM_setTemperaturePowerPin(PIN_PB3);                    // Temperature sensor Power Pin - 19 for emonTx V3.4  (-1 = Not used. No sensors, or sensor are permanently powered.)
@@ -250,12 +282,11 @@ void setup()
   EmonLibCM_Init();                                        // Start continuous monitoring.
   printTemperatureSensorAddresses();
   emontx.Msg = 0;
-  
 }
 
 void loop()             
 {
-  static double E1 = 0.0, E2 = 0.0, E3 = 0.0, E4 = 0.0, E5 = 0.0, E6 = 0.0;    // Sketch's own value to use when a.c. fails.
+  static double ENERGY[] = {0,0,0,0,0,0,0,0,0,0,0,0};   // Sketch's own value to use when a.c. fails.  
   getCalibration();
   
   if (EmonLibCM_Ready())   
@@ -277,59 +308,45 @@ void loop()
 
     if (EmonLibCM_acPresent())
     {
-      emontx.P1 = EmonLibCM_getRealPower(0); 
-      emontx.E1 = EmonLibCM_getWattHour(0); 
-      E1        = EmonLibCM_getWattHour(0);
-
-      emontx.P2 = EmonLibCM_getRealPower(1); 
-      emontx.E2 = EmonLibCM_getWattHour(1); 
-      E2        = EmonLibCM_getWattHour(1);
+      for (int i = 0; i < 6; i++) {
+        emontx.P[i] = EmonLibCM_getRealPower(i);
+        emontx.E[i] = ENERGY[i]= EmonLibCM_getWattHour(i);
+      }
       
-      emontx.P3 = EmonLibCM_getRealPower(2); 
-      emontx.E3 = EmonLibCM_getWattHour(2); 
-      E3        = EmonLibCM_getWattHour(2);
-    
-      emontx.P4 = EmonLibCM_getRealPower(3); 
-      emontx.E4 = EmonLibCM_getWattHour(3); 
-      E4        = EmonLibCM_getWattHour(3);
-
-      emontx.P5 = EmonLibCM_getRealPower(4); 
-      emontx.E5 = EmonLibCM_getWattHour(4); 
-      E5        = EmonLibCM_getWattHour(4);
-
-      emontx.P6 = EmonLibCM_getRealPower(5); 
-      emontx.E6 = EmonLibCM_getWattHour(5); 
-      E6        = EmonLibCM_getWattHour(5);
+      if (ext_enable) {
+        for (int i = 0; i < 6; i++) {
+          emontxext.P[i] = EmonLibCM_getRealPower(6+i);
+          emontxext.E[i] = ENERGY[6+i]= EmonLibCM_getWattHour(6+i);        
+        }
+      }
     }
     else
     {
-      emontx.P1 = assumedVrms2 * EmonLibCM_getIrms(0);       // Alternative calculations for estimated power & energy  
-      emontx.P2 = assumedVrms2 * EmonLibCM_getIrms(1);       //   when no a.c. voltage is available
-      emontx.P3 = assumedVrms2 * EmonLibCM_getIrms(2);       // Alternative calculations for estimated power & energy  
-      emontx.P4 = assumedVrms2 * EmonLibCM_getIrms(3);       //   when no a.c. voltage is available
-      emontx.P5 = assumedVrms2 * EmonLibCM_getIrms(4);
-      emontx.P6 = assumedVrms2 * EmonLibCM_getIrms(5);
-      
-      E1       += assumedVrms2 * EmonLibCM_getIrms(0) * EmonLibCM_getDatalog_period()/3600.0;
-      emontx.E1 = E1 + 0.5;                                        // rounded value
-      E2       += assumedVrms2 * EmonLibCM_getIrms(1) * EmonLibCM_getDatalog_period()/3600.0;
-      emontx.E2 = E2 + 0.5;                                        // rounded value
-      E3       += assumedVrms2 * EmonLibCM_getIrms(2) * EmonLibCM_getDatalog_period()/3600.0;
-      emontx.E3 = E3 + 0.5;                                        // rounded value
-      E4       += assumedVrms2 * EmonLibCM_getIrms(3) * EmonLibCM_getDatalog_period()/3600.0;
-      emontx.E4 = E4 + 0.5;                                        // rounded value
-      E5       += assumedVrms2 * EmonLibCM_getIrms(4) * EmonLibCM_getDatalog_period()/3600.0;
-      emontx.E5 = E5 + 0.5; 
-      E6       += assumedVrms2 * EmonLibCM_getIrms(5) * EmonLibCM_getDatalog_period()/3600.0;
-      emontx.E6 = E6 + 0.5; 
+      for (int i = 0; i < 6; i++) {
+        double irms = EmonLibCM_getIrms(i);
+        emontx.P[i] = assumedVrms2 * irms;
+        ENERGY[i] += assumedVrms2 * irms * EmonLibCM_getDatalog_period()/3600.0;
+        emontx.E[i] = ENERGY[i] + 0.5;                                // rounded value        
+      }
+
+      if (ext_enable) {
+        for (int i = 0; i < 6; i++) {
+          double irms = EmonLibCM_getIrms(6+i);
+          emontxext.P[i] = assumedVrms2 * irms;
+          ENERGY[6+i] += assumedVrms2 * irms * EmonLibCM_getDatalog_period()/3600.0;
+          emontxext.E[i] = ENERGY[6+i] + 0.5;        
+        }
+      }
     }
+    
     emontx.Vrms = EmonLibCM_getVrms() * 100;
     
     emontx.T1 = allTemps[0];
     emontx.T2 = allTemps[1];
     emontx.T3 = allTemps[2];
 
-    emontx.pulse = EmonLibCM_getPulseCount();
+    emontx.pulse1 = EmonLibCM_getPulseCount(0);
+    emontx.pulse2 = EmonLibCM_getPulseCount(1);
     
     if (rf_whitening)
     {
@@ -342,6 +359,19 @@ void loop()
       }
       rfm_send((byte *)&tmp, sizeof(tmp), networkGroup, nodeID, busyThreshold, busyTimeout);     //send data
       delay(50);
+      
+      if (ext_enable) {
+        PayloadTXExt tmpext = emontxext;
+        if (rf_whitening == 2)
+        {
+          byte WHITENING = 0x55;
+          for (byte i = 0, *p = (byte *)&tmpext; i < sizeof tmpext; i++, p++)
+              *p ^= (byte)WHITENING;
+        }
+        rfm_send((byte *)&tmpext, sizeof(tmpext), networkGroup, nodeIDExt, busyThreshold, busyTimeout);     //send extension board data
+      }
+      
+      delay(50);
     }
 
     // ---------------------------------------------------------------------
@@ -349,47 +379,64 @@ void loop()
     // ---------------------------------------------------------------------
     Serial.print(F("MSG:")); Serial.print(emontx.Msg);
     Serial.print(F(",Vrms:")); Serial.print(emontx.Vrms*0.01);
+
+    for (int i = 0; i < 6; i++) {
+      Serial.print(",P" + String(i+1) + ":"); Serial.print(emontx.P[i]);
+    }
     
-    Serial.print(F(",P1:")); Serial.print(emontx.P1);
-    Serial.print(F(",P2:")); Serial.print(emontx.P2);
-    Serial.print(F(",P3:")); Serial.print(emontx.P3);
-    Serial.print(F(",P4:")); Serial.print(emontx.P4);
-    Serial.print(F(",P5:")); Serial.print(emontx.P5);
-    Serial.print(F(",P6:")); Serial.print(emontx.P6);
-  
-    Serial.print(F(",E1:")); Serial.print(emontx.E1);
-    Serial.print(F(",E2:")); Serial.print(emontx.E2);
-    Serial.print(F(",E3:")); Serial.print(emontx.E3);
-    Serial.print(F(",E4:")); Serial.print(emontx.E4);
-    Serial.print(F(",E5:")); Serial.print(emontx.E5);
-    Serial.print(F(",E6:")); Serial.print(emontx.E6);
+    if (ext_enable) {
+      for (int i = 0; i < 6; i++) {
+        Serial.print(",P" + String(i+7) + ":"); Serial.print(emontxext.P[i]);
+      }
+    }
+
+    for (int i = 0; i < 6; i++) {
+      Serial.print(",E" + String(i+1) + ":"); Serial.print(emontx.E[i]);
+    }
+    
+    if (ext_enable) {
+      for (int i = 0; i < 6; i++) {
+        Serial.print(",E" + String(i+7) + ":"); Serial.print(emontxext.E[i]);
+      }
+    }
     
     if (emontx.T1!=30000) { Serial.print(F(",T1:")); Serial.print(emontx.T1*0.01); }
     if (emontx.T2!=30000) { Serial.print(F(",T2:")); Serial.print(emontx.T2*0.01); }
     if (emontx.T3!=30000) { Serial.print(F(",T3:")); Serial.print(emontx.T3*0.01); }
 
-    Serial.print(F(",pulse:")); Serial.print(emontx.pulse);  
+    Serial.print(F(",pulse1:")); Serial.print(emontx.pulse1); 
+    Serial.print(F(",pulse2:")); Serial.print(emontx.pulse2);  
     delay(20);
 
     digitalWrite(LEDpin,HIGH); delay(50);digitalWrite(LEDpin,LOW);
 
     #ifdef SHOW_CAL
       // to show current & power factor for calibration:
-  
-      Serial.print(F(",I1:")); Serial.print(EmonLibCM_getIrms(EmonLibCM_getLogicalChannel(1)),3);
-      Serial.print(F(",I2:")); Serial.print(EmonLibCM_getIrms(EmonLibCM_getLogicalChannel(2)),3);
-      Serial.print(F(",I3:")); Serial.print(EmonLibCM_getIrms(EmonLibCM_getLogicalChannel(3)),3);
-      Serial.print(F(",I4:")); Serial.print(EmonLibCM_getIrms(EmonLibCM_getLogicalChannel(4)),3);
-      Serial.print(F(",I5:")); Serial.print(EmonLibCM_getIrms(EmonLibCM_getLogicalChannel(5)),3);
-      Serial.print(F(",I6:")); Serial.print(EmonLibCM_getIrms(EmonLibCM_getLogicalChannel(6)),3);
+      Serial.println();
+      
+      for (int i = 0; i < 6; i++) {
+        Serial.print(" I" + String(i+1) + ":"); Serial.print(EmonLibCM_getIrms(i),3); Serial.print(", ");
+      }
+    
+      if (ext_enable) {
+        for (int i = 0; i < 6; i++) {
+          Serial.print(" I" + String(i+7) + ":"); Serial.print(EmonLibCM_getIrms(6+i),3); Serial.print(", ");
+        }
+      }
 
-      Serial.print(F(",pf1:")); Serial.print(EmonLibCM_getPF(EmonLibCM_getLogicalChannel(1)),4);
-      Serial.print(F(",pf2:")); Serial.print(EmonLibCM_getPF(EmonLibCM_getLogicalChannel(2)),4);
-      Serial.print(F(",pf3:")); Serial.print(EmonLibCM_getPF(EmonLibCM_getLogicalChannel(3)),4);
-      Serial.print(F(",pf4:")); Serial.print(EmonLibCM_getPF(EmonLibCM_getLogicalChannel(4)),4);
-      Serial.print(F(",pf5:")); Serial.print(EmonLibCM_getPF(EmonLibCM_getLogicalChannel(5)),4);
-      Serial.print(F(",pf6:")); Serial.print(EmonLibCM_getPF(EmonLibCM_getLogicalChannel(6)),4);
+      Serial.println();
 
+      for (int i = 0; i < 6; i++) {
+        Serial.print("pf" + String(i+1) + ":"); Serial.print(EmonLibCM_getPF(i),4); Serial.print(",");
+      }
+    
+      if (ext_enable) {
+        for (int i = 0; i < 6; i++) {
+          Serial.print("pf" + String(i+7) + ":"); Serial.print(EmonLibCM_getPF(6+i),4); Serial.print(",");
+        }
+      }
+
+      Serial.println();
     #endif
     Serial.println();
     

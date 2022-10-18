@@ -44,11 +44,14 @@ const PROGMEM char helpText1[] =
 "  b<n>      - set r.f. band n = a single numeral: 4 = 433MHz, 8 = 868MHz, 9 = 915MHz (may require hardware change)\n"
 "  g<nnn>    - set Network Group  nnn - an integer (OEM default = 210)\n"
 "  i<nn>     - set node ID i= an integer (standard node ids are 1..30)\n"
+"  j<nn>     - set extension node ID i= an integer (standard node ids are 1..30) Can not be the same as node ID\n"
 "  r         - restore sketch defaults\n"
 "  s         - save config to EEPROM\n"
 "  v         - show firmware version\n"
 "  w<x>      - turn RFM Wireless data on or off:\n"
 "            - x = 0 for OFF, x = 1 for ON, x = 2 for ON with whitening\n"
+"  e<y>      - turn extension module on or off:\n"
+"            - y = 0 for OFF, y = 1 for ON\n"
 "  x         - exit and continue\n"
 "  ?         - show this text again\n"
 "\n"
@@ -77,10 +80,20 @@ const PROGMEM char helpText1[] =
 "  ?         - show this text again\n"
 ;
 
-struct eeprom {byte nodeID, RF_freq, networkGroup; 
-      float vCal, i1Cal, i1Lead, i2Cal, i2Lead, i3Cal, i3Lead, i4Cal, i4Lead, i5Cal, i5Lead, i6Cal, i6Lead, period; 
-      bool pulse_enable; int pulse_period; bool temp_enable; byte temp_sensors[48]; int rf_whitening; float assumedVrms;
-      } data;
+struct eeprom {
+  byte nodeID, nodeIDExt, RF_freq, networkGroup; 
+  //float vCal, i1Cal, i1Lead, i2Cal, i2Lead, i3Cal, i3Lead, i4Cal, i4Lead, i5Cal, i5Lead, i6Cal, i6Lead, period;
+  float vCal, period;
+  float iCal[12];
+  float iLead[12];
+  bool pulse_enable; 
+  int pulse_period; 
+  bool temp_enable; 
+  byte temp_sensors[48]; 
+  bool ext_enable;
+  int rf_whitening; 
+  float assumedVrms;
+} data;
 
 extern DeviceAddress *temperatureSensors;
 
@@ -111,6 +124,7 @@ static void load_config(bool verbose)
     byte invalid_config = 0;
     // rfm node id should be 1..30
     if (data.nodeID>=1 && data.nodeID<=30) nodeID = data.nodeID; else invalid_config++;
+    if (data.nodeIDExt>=1 && data.nodeIDExt<=30) nodeIDExt = data.nodeIDExt; else invalid_config++;
     // rfm frequency should be either 433, 868 or 915
     if (data.RF_freq==RF12_433MHZ || data.RF_freq==RF12_868MHZ || data.RF_freq==RF12_915MHZ) RF_freq = data.RF_freq; else invalid_config++;
     // rfm network group should be 1..212
@@ -119,25 +133,20 @@ static void load_config(bool verbose)
     // Calibration values should not be 0 but are less critical
     // and so are copied here without validation
     vCal         = data.vCal;
-    i1Cal        = data.i1Cal;
-    i1Lead       = data.i1Lead;
-    i2Cal        = data.i2Cal;
-    i2Lead       = data.i2Lead;
-    i3Cal        = data.i3Cal;
-    i3Lead       = data.i3Lead; 
-    i4Cal        = data.i4Cal; 
-    i4Lead       = data.i4Lead;
-    i5Cal        = data.i5Cal; 
-    i5Lead       = data.i5Lead;
-    i6Cal        = data.i6Cal; 
-    i6Lead       = data.i6Lead;
-    
+    for(int i = 0; i < 6; i++) {
+      iCal[i] = data.iCal[i];
+      iLead[i] = data.iLead[i]; 
+      iCalExt[i] = data.iCal[6+i];
+      iLeadExt[i] = data.iLead[6+i];
+    }
+        
     // data period must be greater than 0
     if (data.period>0) period = data.period; else invalid_config++; 
     
     pulse_enable = data.pulse_enable;
     pulse_period = data.pulse_period;
     temp_enable  = data.temp_enable;
+    ext_enable  = data.ext_enable;
     rf_whitening = data.rf_whitening;
     assumedVrms2  = data.assumedVrms;
       
@@ -166,6 +175,9 @@ static void list_calibration(void)
   Serial.println(F("Settings:"));
   Serial.print(F("Group ")); Serial.print(networkGroup);
   Serial.print(F(", Node ")); Serial.print(nodeID & 0x1F);
+  if (ext_enable) {
+    Serial.print(F(", Node (Extension module) ")); Serial.print(nodeIDExt & 0x1F);
+  }
   Serial.print(F(", Band ")); 
   Serial.print(RF_freq == RF12_433MHZ ? 433 : 
                RF_freq == RF12_868MHZ ? 868 :
@@ -175,22 +187,25 @@ static void list_calibration(void)
   Serial.println(F("Calibration:"));
   Serial.print(F("vCal = ")); Serial.println(vCal);
   Serial.print(F("assumedV = ")); Serial.println(assumedVrms2);
-  Serial.print(F("i1Cal = ")); Serial.println(i1Cal);
-  Serial.print(F("i1Lead = ")); Serial.println(i1Lead);
-  Serial.print(F("i2Cal = ")); Serial.println(i2Cal);
-  Serial.print(F("i2Lead = ")); Serial.println(i2Lead);
-  Serial.print(F("i3Cal = ")); Serial.println(i3Cal);
-  Serial.print(F("i3Lead = ")); Serial.println(i3Lead);
-  Serial.print(F("i4Cal = ")); Serial.println(i4Cal);
-  Serial.print(F("i4Lead = ")); Serial.println(i4Lead);
-  Serial.print(F("i5Cal = ")); Serial.println(i5Cal);
-  Serial.print(F("i5Lead = ")); Serial.println(i5Lead);
-  Serial.print(F("i6Cal = ")); Serial.println(i6Cal);
-  Serial.print(F("i6Lead = ")); Serial.println(i6Lead);
+
+  for (int i = 0; i < 6; i++) {
+    Serial.print("i" + String(i+1) + "Cal = "); Serial.println(iCal[i]);
+    Serial.print("i" + String(i+1) + "Lead = "); Serial.println(iLead[i]);
+  }
+
+  if (ext_enable) {
+    Serial.println(F("Ext Module Calibration:"));
+    for (int i = 0; i < 6; i++) {
+      Serial.print("i" + String(i+7) + "Cal = "); Serial.println(iCalExt[i]);
+      Serial.print("i" + String(i+7) + "Lead = "); Serial.println(iLeadExt[i]);
+    }
+  }
+  
   Serial.print(F("datalog = ")); Serial.println(period);
   Serial.print(F("pulses = ")); Serial.println(pulse_enable);
   Serial.print(F("pulse period = ")); Serial.println(pulse_period);
   Serial.print(F("temp_enable = ")); Serial.println(temp_enable);
+  Serial.print(F("ext_enable = ")); Serial.println(ext_enable);
   Serial.print(rf_whitening ? (rf_whitening ==1 ? "RF on":"RF whitened"):"RF off"); Serial.print("\n");
 }
 
@@ -204,22 +219,19 @@ static void save_config()
   data.RF_freq      = RF_freq;
   data.networkGroup = networkGroup;
   data.vCal         = vCal;
-  data.i1Cal        = i1Cal;
-  data.i1Lead       = i1Lead;
-  data.i2Cal        = i2Cal;
-  data.i2Lead       = i2Lead;
-  data.i3Cal        = i3Cal;
-  data.i3Lead       = i3Lead; 
-  data.i4Cal        = i4Cal; 
-  data.i4Lead       = i4Lead;      
-  data.i5Cal        = i5Cal; 
-  data.i5Lead       = i5Lead;   
-  data.i6Cal        = i6Cal; 
-  data.i6Lead       = i6Lead; 
+
+  for (int i = 0; i < 6; i++) {
+    data.iCal[i] = iCal[i];
+    data.iLead[i] = iLead[i];
+    data.iCal[6+i] = iCalExt[i];
+    data.iLead[6+i] = iLeadExt[i];
+  }
+
   data.period       = period;
   data.pulse_enable = pulse_enable; 
   data.pulse_period = pulse_period; 
   data.temp_enable  = temp_enable;
+  data.ext_enable  = ext_enable;
   data.rf_whitening = rf_whitening;
   data.assumedVrms  = assumedVrms2;
   memcpy(data.temp_sensors, temp_addr, sizeof(temp_addr)>sizeof(data.temp_sensors)?sizeof(data.temp_sensors):sizeof(temp_addr));
@@ -314,6 +326,11 @@ static bool config(void)
           Serial.print(F("Node ")); Serial.println(nodeID & 0x1F);
           break;
 
+        case 'j':  //  Set NodeID )range expected: 1 - 30
+          nodeIDExt = Serial.parseFloat();
+          Serial.print(F("Node ")); Serial.println(nodeIDExt & 0x1F);
+          break;
+
         case 'l': // print the calibration values
           list_calibration();
           break;
@@ -336,6 +353,13 @@ static bool config(void)
            */
           rf_whitening = Serial.parseFloat(); 
           Serial.print(rf_whitening ? (rf_whitening ==1 ? "RF on":"RF whitened"):"RF off"); Serial.print("\n");
+          break;
+
+        case 'e' :  // Extension board Off / On / On & whitened
+          /* Format expected: e[y]
+           */
+          ext_enable = Serial.parseFloat(); 
+          Serial.print(ext_enable ? "Extension module enabled":"Extension module disabled"); Serial.print("\n");
           break;
           
         case 'x':  // exit and continue
@@ -417,45 +441,23 @@ void getCalibration(void)
         k3 = Serial.parseFloat(); 
         while (Serial.available())
           Serial.read(); 
-              
+
         // Write the values back as Globals, re-calculate intermediate values.
-        switch (k1) {
-          case 0 : EmonLibCM_ReCalibrate_VChannel(k2);
-            vCal = k2;
-            break;
-              
-          case 1 : EmonLibCM_ReCalibrate_IChannel(1, k2, k3);
-            i1Cal = k2;
-            i1Lead = k3;
-            break;
-
-          case 2 : EmonLibCM_ReCalibrate_IChannel(2, k2, k3);
-            i2Cal = k2;
-            i2Lead = k3;
-            break;
-
-          case 3 : EmonLibCM_ReCalibrate_IChannel(3, k2, k3);
-            i3Cal = k2;
-            i3Lead = k3;
-            break;
-
-          case 4 : EmonLibCM_ReCalibrate_IChannel(4, k2, k3);
-            i4Cal = k2;
-            i4Lead = k3;
-            break;
-
-          case 5 : EmonLibCM_ReCalibrate_IChannel(5, k2, k3);
-            i5Cal = k2;
-            i5Lead = k3;
-            break;
-
-          case 6 : EmonLibCM_ReCalibrate_IChannel(6, k2, k3);
-            i6Cal = k2;
-            i6Lead = k3;
-            break;
-                                 
-          default : ;
+        if (k1 == 0) {
+          EmonLibCM_ReCalibrate_VChannel(k2);
+          vCal = k2;
         }
+        else if (k1 <= 6) {
+          EmonLibCM_ReCalibrate_IChannel(k1, k2, k3);
+          iCal[k1 - 1] = k2;
+          iLead[k1 - 1] = k3;
+        }
+        else if (k1 <= 12) {
+          EmonLibCM_ReCalibrate_IChannel(k1, k2, k3);
+          iCalExt[k1 - 7] = k2;
+          iLeadExt[k1 - 7] = k3;
+        }
+              
         Serial.print(F("Cal: k"));Serial.print(k1);Serial.print(F(" "));Serial.print(k2);Serial.print(F(" "));Serial.println(k3);        
         break;
           
